@@ -104,3 +104,10 @@ SFERA_USERNAME = os.getenv("SFERA_USERNAME", "")
 SFERA_PASSWORD = os.getenv("SFERA_PASSWORD", "")
 SFERA_API_TIMEOUT = 60
 SFERA_RETRY_ATTEMPTS = 3
+
+# Cloud.ru VMware Cloud Director
+USE_VMWARE_API = os.getenv("USE_VMWARE_API", "false").strip().lower() in {"true", "1", "yes"}
+VCD_SITE = os.getenv("VCD_SITE", "").strip().rstrip("/")
+VCD_TENANT = os.getenv("VCD_TENANT", "").strip()
+VCD_API_TOKEN = os.getenv("VCD_API_TOKEN", "").strip()
+VCD_INCLUDE_RIGHTS = os.getenv("VCD_INCLUDE_RIGHTS", "true").strip().lower() in {"true", "1", "yes"}

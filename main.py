@@ -17,6 +17,7 @@ def get_user_choice():
     print("1 - 1С")
     print("2 - Сфера Курьер")
     print("3 - Контур Диадок")
+    print("4 - Cloud.ru VMware")
     print("="*50)
     
     while True:
@@ -29,14 +30,14 @@ def get_user_choice():
         choices = choice.split()
         
         # Проверка на валидность ввода
-        valid_choices = {'0', '1', '2', '3'}
+        valid_choices = {'0', '1', '2', '3', '4'}
         if all(c in valid_choices for c in choices):
             # Если выбран 0, добавляем все остальные опции
             if '0' in choices:
-                return {0, 1, 2, 3}
+                return {0, 1, 2, 3} | {int(c) for c in choices}
             return set(int(c) for c in choices)
         else:
-            print("Некорректный ввод. Пожалуйста, используйте цифры 0, 1, 2, 3 через пробел")
+            print("Некорректный ввод. Пожалуйста, используйте цифры 0, 1, 2, 3, 4 через пробел")
 
 def get_employee_type_choice():
     """Получение выбора типа сотрудников"""

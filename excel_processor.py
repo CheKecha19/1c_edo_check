@@ -11,6 +11,9 @@ from assessment import (
     NameIndex, assess_account, compare_staff, name_parts,
 )
 from config import COMPARISON_SHEET, EMPLOYEES_FILE, GPH_FILE, OUTPUT_FILE, SHEET_NAME
+from api_clients.vmware_client import VcdError
+from config import USE_VMWARE_API, VCD_TENANT, VCD_INCLUDE_RIGHTS
+from processors import vmware_processor as vmware
 from processors.onec_processor import load_onec_data_new_format
 from utils import get_diadoc_data_source, get_kontur_data_source, load_shtat_data
 
@@ -43,17 +46,18 @@ def account_status(value):
     value = str(value).strip().casefold()
     if value in {"да", "активна", "true", "1"}:
         return ACTIVE
-    if value in {"нет", "заблокирована", "false", "0"}:
+    if value in {"нет", "неактивна", "заблокирована", "false", "0"}:
         return DISABLED
     return UNKNOWN_STATUS
 
 
-def evaluate_service(data, system, name_col, status_col, roster, contractors, categories):
+def evaluate_service(data, system, name_col, status_col, roster, contractors, categories, identity_columns=()):
     names = data[name_col].dropna()
     service_index = NameIndex(names)
     rows = []
-    for name, raw_status in data[[name_col, status_col]].itertuples(index=False, name=None):
-        if not name_parts(name):
+    columns = [name_col, status_col, *identity_columns]
+    for name, raw_status, *identity in data[columns].itertuples(index=False, name=None):
+        if not identity_columns and not name_parts(name):
             continue
         result = assess_account(name, account_status(raw_status), roster, contractors, service_index)
         # Неклассифицированная запись требует проверки при любом фильтре.
@@ -62,8 +66,8 @@ def evaluate_service(data, system, name_col, status_col, roster, contractors, ca
                 continue
             if result["Основание"] == "ГПХ в AD" and 2 not in categories:
                 continue
-        rows.append({"Система": system, "ФИО": name, **result})
-    return pd.DataFrame(rows, columns=RESULT_COLUMNS)
+        rows.append({"Система": system, "ФИО": name, **result, **dict(zip(identity_columns, identity))})
+    return pd.DataFrame(rows, columns=[*RESULT_COLUMNS, *identity_columns])
 
 
 def process_excel_data(selected_options=None, employee_types=None, ad_counts=None, snapshot_dir=None):
@@ -131,6 +135,29 @@ def process_excel_data(selected_options=None, employee_types=None, ad_counts=Non
         logger.info("%s: на проверку доступа %s, недостаточно данных %s",
                     system, len(candidates), (audit["Результат"] == UNKNOWN).sum())
 
+    if 4 in selected or (0 in selected and USE_VMWARE_API):
+        label = f"{vmware.SYSTEM} ({VCD_TENANT})" if VCD_TENANT else vmware.SYSTEM
+        try:
+            users, role_rights = vmware.load_vmware()
+        except Exception as error:
+            reason = str(error) if isinstance(error, VcdError) else type(error).__name__
+            logger.error("Источник %s недоступен: %s", label, reason)
+            record_source(label, None)
+            source_status[-1]["Причина"] = reason
+        else:
+            record_source(label, users)
+            audit = evaluate_service(users, vmware.SYSTEM, "ФИО", "Статус VMware", roster,
+                                     contractors, categories, ("Тенант", "ID учётки", "Логин"))
+            audits.append(audit)
+            extra_sheets["Пользователи VMware"] = users
+            if VCD_INCLUDE_RIGHTS:
+                extra_sheets["Права ролей VMware"] = role_rights
+            candidates = audit[audit["Результат"] == REVIEW]
+            if not candidates.empty:
+                extra_sheets["удалить из Cloud.ru VMware"] = candidates
+            logger.info("%s: получено %d учёток, проверить доступ у %d",
+                        label, len(users), len(candidates))
+
     assessment = pd.concat(audits, ignore_index=True) if audits else pd.DataFrame(columns=RESULT_COLUMNS)
     sheets = {
         "Оценка доступа": assessment,
@@ -149,6 +176,11 @@ def process_excel_data(selected_options=None, employee_types=None, ad_counts=Non
         with pd.ExcelWriter(temporary_path, engine="openpyxl") as writer:
             for title, frame in sheets.items():
                 frame.to_excel(writer, sheet_name=title, index=False)
+                # Все листы аудита содержат данные, включая имена и роли из внешних систем.
+                for row in writer.sheets[title].iter_rows(min_row=2):
+                    for cell in row:
+                        if cell.data_type == "f":
+                            cell.data_type = "s"
         temporary_path.replace(OUTPUT_FILE)
     finally:
         temporary_path.unlink(missing_ok=True)
