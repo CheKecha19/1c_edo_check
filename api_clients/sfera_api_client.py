@@ -156,8 +156,8 @@ class SferaAPIClient:
             full_name = ' '.join(filter(None, [last_name, first_name, middle_name])).strip()
 
             # Активен
-            is_active_elem = user_elem.find('IsActive')
-            is_active = is_active_elem.text.lower() == 'true' if is_active_elem is not None else False
+            activity = user_elem.findtext('IsActive', '').strip().casefold()
+            is_active = {'true': True, 'false': False, '1': True, '0': False}.get(activity)
 
             # Роли
             roles = []
@@ -202,7 +202,7 @@ class SferaAPIClient:
             is_admin = admin_role_id in user['roles']
             data.append({
                 'Сфера_Курьер_ФИО': user['full_name'],
-                'Сфера_Курьер_Активен': 'Да' if user['is_active'] else 'Нет',
+                'Сфера_Курьер_Активен': {True: 'Да', False: 'Нет'}.get(user['is_active'], 'Неизвестно'),
                 'Сфера_Курьер_Администратор': 'Да' if is_admin else 'Нет'
             })
         df = pd.DataFrame(data)

@@ -186,12 +186,17 @@ class DiadocAPIClient:
                 permissions = emp.get('Permissions', {})
                 is_admin = permissions.get('IsAdministrator', False)
                 auth_perm = permissions.get('AuthorizationPermission', {})
-                is_blocked = auth_perm.get('IsBlocked', False)
+                is_blocked = auth_perm.get('IsBlocked')
+                status = 'неизвестно'
+                if is_blocked is True:
+                    status = 'заблокирована'
+                elif is_blocked is False:
+                    status = 'активна'
 
                 data.append({
                     'Контур_Диадок_ФИО': fio,
                     'Контур_Диадок_Администратор': 'да' if is_admin else 'нет',
-                    'Контур_Диадок_статус': 'заблокирована' if is_blocked else 'активна'
+                    'Контур_Диадок_статус': status
                 })
             except Exception as e:
                 logger.warning(f"Ошибка обработки сотрудника: {e}. Запись пропущена.")

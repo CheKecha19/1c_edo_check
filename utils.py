@@ -34,7 +34,7 @@ def find_latest_file(directory, patterns=None):
         try:
             pattern_files = list(directory.glob(pattern))
             for file in pattern_files:
-                if is_file_recent(file):
+                if not file.name.startswith("~$") and is_file_recent(file):
                     files.append(file)
         except Exception as e:
             logger.debug(f"Ошибка при поиске файлов по шаблону {pattern} в {directory}: {e}")
@@ -61,92 +61,74 @@ def get_shtat_file():
     """Находит файл штатного расписания"""
     return find_latest_file(SHTAT_DIR)
 
-# ========== ФУНКЦИИ ЗАГРУЗКИ ИЗ EXCEL (СТАРЫЕ, ПОЛНОСТЬЮ РАБОЧИЕ) ==========
+def _header(frame, aliases):
+    headers = {str(col).strip().casefold(): col for col in frame}
+    for alias in aliases:
+        if alias in headers:
+            return headers[alias]
+    matches = [col for label, col in headers.items() if any(alias in label for alias in aliases)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _column(frame, aliases, required=False):
+    header = _header(frame, aliases)
+    if header is not None:
+        return frame[header]
+    if required:
+        raise ValueError(f"Нет однозначного столбца {aliases[0]}")
+    return pd.Series(pd.NA, index=frame.index, dtype=object)
+
+
+def _block_date_status(value):
+    if pd.isna(value) or not str(value).strip():
+        return "активна"
+    try:
+        pd.Timestamp(str(value).strip())
+    except (TypeError, ValueError):
+        return "неизвестно"
+    return "заблокирована"
+
 
 def load_kontur_data_from_excel():
-    """Загрузка данных из Excel-файла Контур Диадок (старый метод)"""
+    columns = ["Контур_Диадок_ФИО", "Контур_Диадок_Администратор", "Контур_Диадок_статус"]
+    path = get_kontur_file()
+    if path is None:
+        return pd.DataFrame(columns=columns)
     try:
-        kontur_file = get_kontur_file()
-        if not kontur_file:
-            logger.warning("Актуальный файл Контур Диадок не найден")
-            return pd.DataFrame(columns=['Контур_Диадок_ФИО', 'Контур_Диадок_Администратор', 'Контур_Диадок_статус'])
-        logger.info(f"Загрузка данных из файла: {kontur_file.name}")
-        df = pd.read_excel(kontur_file)
-        # Переименование стандартных колонок
-        df = df.rename(columns={
-            'ФИО': 'Контур_Диадок_ФИО',
-            'Администратор': 'Контур_Диадок_Администратор',
-            'Дата блокировки': 'Контур_Диадок_статус'
-        })
-        # Если переименование не сработало, ищем похожие колонки
-        if 'Контур_Диадок_ФИО' not in df.columns:
-            for col in df.columns:
-                if any(keyword in str(col).lower() for keyword in ['фио', 'ф.и.о.', 'name']):
-                    df = df.rename(columns={col: 'Контур_Диадок_ФИО'})
-                elif any(keyword in str(col).lower() for keyword in ['администратор', 'admin']):
-                    df = df.rename(columns={col: 'Контур_Диадок_Администратор'})
-                elif any(keyword in str(col).lower() for keyword in ['дата блокировки', 'блокировка', 'статус']):
-                    df = df.rename(columns={col: 'Контур_Диадок_статус'})
-        # Берем только нужные колонки
-        result_df = df[['Контур_Диадок_ФИО', 'Контур_Диадок_Администратор', 'Контур_Диадок_статус']].copy()
-        # Преобразование администратора
-        if 'Контур_Диадок_Администратор' in result_df.columns:
-            admin_series = result_df['Контур_Диадок_Администратор'].astype(str)
-            admin_series = admin_series.apply(
-                lambda x: 'да' if x.lower() in ['true', 'истина', '1', 'yes', 'да'] 
-                else 'нет' if x.lower() in ['false', 'ложь', '0', 'no', 'нет'] 
-                else x
-            )
-            result_df = result_df.assign(Контур_Диадок_Администратор=admin_series)
-        # Преобразование статуса
-        if 'Контур_Диадок_статус' in result_df.columns:
-            status_series = result_df['Контур_Диадок_статус'].apply(
-                lambda x: 'заблокирована' if pd.notna(x) and str(x).strip() != '' 
-                else 'активна'
-            )
-            result_df = result_df.assign(Контур_Диадок_статус=status_series)
-        logger.info(f"Загружено {len(result_df)} записей из Контур Диадок (Excel)")
-        return result_df
-    except Exception as e:
-        logger.error(f"Ошибка при загрузке данных Контур Диадок из Excel: {e}")
-        return pd.DataFrame(columns=['Контур_Диадок_ФИО', 'Контур_Диадок_Администратор', 'Контур_Диадок_статус'])
+        frame = pd.read_excel(path, keep_default_na=False)
+        names = _column(frame, ["фио", "ф.и.о.", "name"], required=True)
+        admin = _column(frame, ["администратор", "admin"])
+        admin = admin.map(lambda v: {"true": "да", "false": "нет", "1": "да", "0": "нет"}
+                          .get(str(v).strip().casefold(), v))
+        date_header = _header(frame, ["дата блокировки"])
+        # Пустая ячейка в существующей колонке означает действующую учётку.
+        if date_header is not None:
+            status = frame[date_header].map(_block_date_status)
+        else:
+            status = _column(frame, ["статус", "блокировка"]).map(
+                lambda v: {"активна": "активна", "заблокирована": "заблокирована"}
+                .get(str(v).strip().casefold(), "неизвестно"))
+        return pd.DataFrame({columns[0]: names, columns[1]: admin, columns[2]: status})
+    except Exception:
+        logger.exception("Не удалось прочитать выгрузку Контур Диадок")
+        return pd.DataFrame(columns=columns)
+
 
 def load_diadoc_data_from_excel():
-    """Загрузка данных из Excel-файла Сфера Курьер (старый метод)"""
+    columns = ["Сфера_Курьер_ФИО", "Сфера_Курьер_Активен", "Сфера_Курьер_Администратор"]
+    path = get_diadoc_file()
+    if path is None:
+        return pd.DataFrame(columns=columns)
     try:
-        diadoc_file = get_diadoc_file()
-        if not diadoc_file:
-            logger.warning("Актуальный файл Сфера Курьер не найден")
-            return pd.DataFrame(columns=['Сфера_Курьер_ФИО', 'Сфера_Курьер_Активен', 'Сфера_Курьер_Администратор'])
-        logger.info(f"Загрузка данных из файла: {diadoc_file.name}")
-        df = pd.read_excel(diadoc_file)
-        # Переименование стандартных колонок
-        df = df.rename(columns={
-            'ФИО': 'Сфера_Курьер_ФИО',
-            'Активен': 'Сфера_Курьер_Активен',
-            'Администратор': 'Сфера_Курьер_Администратор'
-        })
-        # Поиск колонок, если стандартные имена не сработали
-        if 'Сфера_Курьер_ФИО' not in df.columns:
-            for col in df.columns:
-                if any(keyword in str(col).lower() for keyword in ['фио', 'ф.и.о.', 'name']):
-                    df = df.rename(columns={col: 'Сфера_Курьер_ФИО'})
-                elif any(keyword in str(col).lower() for keyword in ['активен', 'active', 'статус']):
-                    df = df.rename(columns={col: 'Сфера_Курьер_Активен'})
-                elif any(keyword in str(col).lower() for keyword in ['администратор', 'admin']):
-                    df = df.rename(columns={col: 'Сфера_Курьер_Администратор'})
-        # Берем только нужные колонки
-        result_df = df[['Сфера_Курьер_ФИО', 'Сфера_Курьер_Активен', 'Сфера_Курьер_Администратор']].copy()
-        # Преобразование значений в строки и обрезка пробелов
-        if 'Сфера_Курьер_Активен' in result_df.columns:
-            result_df['Сфера_Курьер_Активен'] = result_df['Сфера_Курьер_Активен'].astype(str).str.strip()
-        if 'Сфера_Курьер_Администратор' in result_df.columns:
-            result_df['Сфера_Курьер_Администратор'] = result_df['Сфера_Курьер_Администратор'].astype(str).str.strip()
-        logger.info(f"Загружено {len(result_df)} записей из Сфера Курьер (Excel)")
-        return result_df
-    except Exception as e:
-        logger.error(f"Ошибка при загрузке данных Сфера Курьер из Excel: {e}")
-        return pd.DataFrame(columns=['Сфера_Курьер_ФИО', 'Сфера_Курьер_Активен', 'Сфера_Курьер_Администратор'])
+        frame = pd.read_excel(path, keep_default_na=False)
+        names = _column(frame, ["фио", "ф.и.о.", "name"], required=True)
+        active = _column(frame, ["активен", "active", "статус"])
+        admin = _column(frame, ["администратор", "admin"])
+        return pd.DataFrame({columns[0]: names, columns[1]: active, columns[2]: admin})
+    except Exception:
+        logger.exception("Не удалось прочитать выгрузку Сфера Курьер")
+        return pd.DataFrame(columns=columns)
+
 
 def load_shtat_data():
     """Загрузка данных из штатного расписания"""

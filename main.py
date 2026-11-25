@@ -1,7 +1,8 @@
 # main.py
 import logging
-import pandas as pd
-from config import INPUT_DIR, OUTPUT_DIR, OUTPUT_FILE
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from config import OUTPUT_FILE
 from excel_processor import process_excel_data
 from ad_export import export_ad_users
 
@@ -14,8 +15,8 @@ def get_user_choice():
     print("Выберите опции для проверки (через пробел):")
     print("0 - Всё")
     print("1 - 1С")
-    print("2 - Сфера Курьер")  # ← ИЗМЕНИЛ: Диадок → Сфера Курьер
-    print("3 - Контур Диадок")  # ← ИЗМЕНИЛ: Контур → Контур Диадок
+    print("2 - Сфера Курьер")
+    print("3 - Контур Диадок")
     print("="*50)
     
     while True:
@@ -74,40 +75,20 @@ def main():
     logger.info(f"Выбранные опции: {selected_options}")
     logger.info(f"Выбранные типы сотрудников: {selected_employee_types}")
     
-    # Экспорт данных из AD (всегда выполняется)
-    try:
-        logger.info("Экспорт пользователей из Active Directory")
-        total_users, employees_count, gph_count = export_ad_users()
-        logger.info(f"Экспорт AD завершен: {total_users} пользователей, {employees_count} сотрудников, {gph_count} ГПХ")
-    except Exception as e:
-        logger.error(f"Ошибка при экспорте из AD: {e}")
-        logger.info("Продолжение обработки с пустыми данными AD")
-        total_users, employees_count, gph_count = 0, 0, 0
-    
-    # Обработка Excel данных
-    try:
-        logger.info("Обработка Excel данных")
-        results = process_excel_data(selected_options, selected_employee_types)
-        
-        logger.info("Обработка завершена. Результаты:")
-        if 1 in selected_options or 0 in selected_options:
-            logger.info(f"- Дубликаты между AD и 1С: {results.get('duplicates_ad_1c', 0)}")
-            logger.info(f"- Внутренние дубликаты в 1С: {results.get('internal_duplicates_1c', 0)}")
-            logger.info(f"- Пользователей для удаления из 1С: {len(results.get('users_to_remove_1c', pd.DataFrame()))}")
-        if 2 in selected_options or 0 in selected_options:
-            logger.info(f"- Дубликаты между AD и Сфера Курьер: {results.get('duplicates_ad_diadoc', 0)}")  # ← ИЗМЕНИЛ
-            logger.info(f"- Внутренние дубликаты в Сфере Курьер: {results.get('internal_duplicates_diadoc', 0)}")  # ← ИЗМЕНИЛ
-            logger.info(f"- Пользователей для удаления из Сферы Курьер: {len(results.get('users_to_remove_diadoc', pd.DataFrame()))}")  # ← ИЗМЕНИЛ
-        if 3 in selected_options or 0 in selected_options:
-            logger.info(f"- Дубликаты между AD и Контур Диадок: {results.get('duplicates_ad_kontur', 0)}")  # ← ИЗМЕНИЛ
-            logger.info(f"- Внутренние дубликаты в Контур Диадок: {results.get('internal_duplicates_kontur', 0)}")  # ← ИЗМЕНИЛ
-            logger.info(f"- Пользователей для удаления из Контур Диадок: {len(results.get('users_to_remove_kontur', pd.DataFrame()))}")  # ← ИЗМЕНИЛ
-        logger.info(f"- Несоответствий между AD и Штатным расписанием: {results.get('comparison_count', 0)}")
-        
-    except Exception as e:
-        logger.error(f"Ошибка при обработке Excel: {str(e)}")
-    
-    logger.info(f"Результаты сохранены в файл: {OUTPUT_FILE}")
+    with TemporaryDirectory() as directory:
+        snapshot = Path(directory)
+        ad_counts = None
+        try:
+            total, staff, contractors = export_ad_users(snapshot_dir=snapshot)
+            ad_counts = (staff, contractors)
+            logger.info("AD: всего %d, штатных %d, ГПХ %d", total, staff, contractors)
+        except Exception:
+            logger.exception("Экспорт AD недоступен. Продолжаем проверку по штатке")
+
+        process_excel_data(selected_options, selected_employee_types,
+                           ad_counts=ad_counts, snapshot_dir=snapshot)
+    logger.info("Результаты сохранены в файл: %s", OUTPUT_FILE)
+
 
 if __name__ == "__main__":
     main()

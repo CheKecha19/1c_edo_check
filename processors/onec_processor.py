@@ -2,95 +2,60 @@
 import pandas as pd
 import os
 import logging
-from utils import get_onec_file, is_file_recent, normalize_name, find_duplicates, find_internal_duplicates, find_users_to_remove
+from utils import get_onec_file, is_file_recent, find_duplicates, find_internal_duplicates, find_users_to_remove
 
 logger = logging.getLogger(__name__)
 
+ONEC_COLUMNS = ['1C_ФИО', '1C_Активен']
+
+
+def _read_onec_report(file_path):
+    """Найти поля на листе по заголовкам, сохраняя неизвестные статусы."""
+    raw = pd.read_excel(file_path, sheet_name='Лист_1', header=None, keep_default_na=False)
+    # Pandas возвращает значение горизонтально объединённых ячеек в левой колонке.
+    header_row = None
+    for position, row in enumerate(raw.itertuples(index=False, name=None)):
+        labels = [str(value).strip().casefold() for value in row]
+        if labels.count('пользователь') != 1:
+            continue
+        if 'недействителен' in labels:
+            header_row = position, labels
+            break
+        if header_row is None:
+            header_row = position, labels
+
+    if header_row is None:
+        raise ValueError("На листе Лист_1 не найден заголовок «Пользователь»")
+    position, labels = header_row
+    names = raw.iloc[position + 1:, labels.index('пользователь')].astype(str).str.strip()
+    result = pd.DataFrame({'1C_ФИО': names})
+    if labels.count('недействителен') == 1:
+        invalid = raw.iloc[position + 1:, labels.index('недействителен')]
+        result['1C_Активен'] = invalid.astype(str).str.strip().str.casefold().map(
+            {'нет': 'Да', 'да': 'Нет'}
+        ).fillna('Неизвестно')
+    else:
+        logger.warning("Не удалось определить колонку «Недействителен» в выгрузке 1С")
+        result['1C_Активен'] = 'Неизвестно'
+    return result.loc[names.ne('')].reset_index(drop=True)
+
+
 def load_onec_data_new_format():
-    """
-    Загрузка данных из 1С в новом формате с обработкой объединенных ячеек
-    """
+    """Прочитать актуальную выгрузку 1С и исключить служебные учётные записи."""
     try:
         onec_file = get_onec_file()
         if not onec_file or not is_file_recent(onec_file):
             logger.warning("Актуальный файл 1С не найден")
-            return pd.DataFrame(columns=['1C_ФИО', '1C_Активен'])
+            return pd.DataFrame(columns=ONEC_COLUMNS)
+        users = _read_onec_report(onec_file)
+        service_accounts = users['1C_ФИО'].str.contains('сервис|robot|робот', case=False)
+        result = users.loc[~service_accounts].reset_index(drop=True)
+        logger.info("Загружено %d записей из 1С", len(result))
+        return result
+    except Exception:
+        logger.exception("Ошибка при загрузке данных 1С")
+        return pd.DataFrame(columns=ONEC_COLUMNS)
 
-        # Читаем Excel файл без пропуска строк, чтобы найти начало данных
-        df_raw = pd.read_excel(onec_file, sheet_name='Лист_1', header=None)
-        
-        logger.debug(f"Размер сырых данных: {df_raw.shape}")
-        
-        # Находим строку с заголовком "Пользователь"
-        start_row = None
-        for i in range(len(df_raw)):
-            # Проверяем первый столбец на наличие "Пользователь"
-            if (pd.notna(df_raw.iloc[i, 0]) and 
-                str(df_raw.iloc[i, 0]).strip() == 'Пользователь'):
-                start_row = i
-                logger.debug(f"Найдена строка с заголовком в позиции {i}")
-                break
-        
-        if start_row is None:
-            logger.error("Не найдена строка с заголовком 'Пользователь'")
-            return pd.DataFrame(columns=['1C_ФИО', '1C_Активен'])
-        
-        # Читаем данные, начиная со строки после заголовка
-        df_data = pd.read_excel(
-            onec_file, 
-            sheet_name='Лист_1',
-            skiprows=start_row + 1,  # Пропускаем строку заголовка
-            header=None
-        )
-        
-        logger.debug(f"Размер данных после пропуска: {df_data.shape}")
-        
-        # Создаем список для данных
-        data = []
-        valid_rows = 0
-        
-        for index, row in df_data.iterrows():
-            # Проверяем, что строка содержит данные
-            if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == '':
-                continue
-                
-            # Извлекаем ФИО из первого столбца (индекс 0)
-            user_name = str(row.iloc[0]).strip()
-            
-            # Извлекаем статус из пятого столбца (индекс 4) - столбец E "Недействителен"
-            if len(row) > 4 and pd.notna(row.iloc[4]):
-                status = str(row.iloc[4]).strip()
-                is_active = status == 'Нет'  # "Нет" = активен, "Да" = неактивен
-                active_status = 'Да' if is_active else 'Нет'
-                logger.debug(f"Пользователь {user_name}: статус '{status}' -> активен: {is_active}")
-            else:
-                # Если статус не найден, считаем активным
-                active_status = 'Да'
-                logger.debug(f"Статус не найден для пользователя {user_name}, помечен как активный")
-            
-            # Пропускаем служебные записи
-            if any(service in user_name.lower() for service in ['сервис', 'robot', 'робот']):
-                logger.debug(f"Пропущена служебная запись: {user_name}")
-                continue
-                
-            data.append({
-                '1C_ФИО': user_name,
-                '1C_Активен': active_status
-            })
-            valid_rows += 1
-        
-        logger.info(f"Загружено {valid_rows} записей из 1С")
-        
-        if valid_rows == 0:
-            logger.warning("Не найдено валидных записей пользователей в файле 1С")
-            # Выведем первые несколько строк для отладки
-            logger.debug(f"Первые 5 строк данных: {df_data.head().values.tolist()}")
-        
-        return pd.DataFrame(data)
-        
-    except Exception as e:
-        logger.error(f"Ошибка при загрузке данных 1С: {e}", exc_info=True)
-        return pd.DataFrame(columns=['1C_ФИО', '1C_Активен'])
 
 def process_onec_data(df, ad_employees_df, selected_options, employee_types):
     """Обработка данных из 1С"""
@@ -156,88 +121,32 @@ def process_onec_data(df, ad_employees_df, selected_options, employee_types):
     
     return df, results
 
-# Сохраняем старые функции для тестирования
 def parse_1c_users_report(file_path):
-    """
-    Парсит отчёт 1С по пользователям в новом формате (для тестирования)
-    """
+    """Прочитать все записи 1С. Для неизвестного статуса is_active равен None."""
     try:
-        # Читаем Excel файл
-        df = pd.read_excel(file_path, sheet_name='Лист_1', header=None)
-        
-        print(f"Размер сырых данных: {df.shape}")
-        
-        # Находим строку с заголовком "Пользователь"
-        start_row = None
-        for i in range(len(df)):
-            if (pd.notna(df.iloc[i, 0]) and 
-                str(df.iloc[i, 0]).strip() == 'Пользователь'):
-                start_row = i
-                print(f"Найдена строка с заголовком в позиции {i}")
-                break
-        
-        if start_row is None:
-            raise ValueError("Не найдена строка с заголовком 'Пользователь'")
-        
-        # Читаем данные, начиная со строки после заголовка
-        df_data = pd.read_excel(
-            file_path, 
-            sheet_name='Лист_1',
-            skiprows=start_row + 1,
-            header=None
-        )
-        
-        print(f"Размер данных после пропуска: {df_data.shape}")
-        print(f"Первые 5 строк данных:")
-        for i in range(min(5, len(df_data))):
-            print(f"Строка {i}: {df_data.iloc[i].values}")
-        
-        # Форматируем результат
-        users_data = []
-        for index, row in df_data.iterrows():
-            if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == '':
-                continue
-                
-            user_name = str(row.iloc[0]).strip()
-            
-            # Из столбца E (индекс 4) - "Недействителен"
-            if len(row) > 4 and pd.notna(row.iloc[4]):
-                status = str(row.iloc[4]).strip()
-                is_active = status == 'Нет'  # "Нет" = активен, "Да" = неактивен
-                print(f"Пользователь {user_name}: статус '{status}' -> активен: {is_active}")
-            else:
-                is_active = True
-                print(f"Пользователь {user_name}: статус не найден -> активен: {is_active}")
-            
-            user_data = {
-                'user_name': user_name,
-                'is_active': is_active,
-            }
-            users_data.append(user_data)
-        
-        return users_data
-        
-    except Exception as e:
-        print(f"Ошибка при обработке файла: {e}")
-        import traceback
-        traceback.print_exc()
+        users = _read_onec_report(file_path)
+        statuses = {'Да': True, 'Нет': False}
+        return [
+            {'user_name': name, 'is_active': statuses.get(active)}
+            for name, active in users.itertuples(index=False, name=None)
+        ]
+    except Exception:
+        logger.exception("Не удалось прочитать выгрузку 1С")
         return []
 
+
 def process_users_data(users_data):
-    """
-    Обрабатывает данные пользователей (сохранена предыдущая функциональность)
-    """
-    active_users = [user for user in users_data if user['is_active']]
-    inactive_users = [user for user in users_data if not user['is_active']]
-    
+    """Показать число активных, неактивных и неопределённых записей."""
+    active = sum(user['is_active'] is True for user in users_data)
+    inactive = sum(user['is_active'] is False for user in users_data)
     print(f"Всего пользователей: {len(users_data)}")
-    print(f"Активных: {len(active_users)}")
-    print(f"Неактивных: {len(inactive_users)}")
-    
-    # Пример дополнительной обработки
-    for user in users_data[:5]:  # Покажем первые 5 пользователей
-        print(f"\nПользователь: {user['user_name']}")
-        print(f"  Активен: {'Да' if user['is_active'] else 'Нет'}")
+    print(f"Активных: {active}")
+    print(f"Неактивных: {inactive}")
+    print(f"Неизвестно: {len(users_data) - active - inactive}")
+    labels = {True: 'Да', False: 'Нет', None: 'Неизвестно'}
+    for user in users_data[:5]:
+        print(f"Пользователь: {user['user_name']}, активен: {labels[user['is_active']]}")
+
 
 # Использование
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ ONEC_DIR.mkdir(exist_ok=True)
 MAX_FILE_AGE_DAYS = 180
 
 # Генерация имени файла с датой и временем
-current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+current_time = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 OUTPUT_FILE = OUTPUT_DIR / f"результат_обработки_{current_time}.xlsx"
 
 # Файлы сотрудников и ГПХ (создаются автоматически)
